@@ -43,11 +43,24 @@ class PharmacyDatabase {
         return "User added successfully";
     }
 
-    public function addPrescription($patientUserName, $medicationId, $dosageInstructions, $quantity) {
-        // Check patient exists
+    public function addPrescription($patientUserName, $medicationId, $dosageInstructions, $quantity, $refillCount) {
+        if (strlen($dosageInstructions) > 255) {
+            error_log("Dosage instructions too long for patient: " . $patientUserName);
+            return "Dosage instructions must be 255 characters or less";
+        }
+        if ($refillCount < 0) {
+            error_log("Invalid refill count for patient: " . $patientUserName . ", refillCount: " . $refillCount);
+            return "Refills must be 0 or more";
+        }
+
         $stmt = $this->connection->prepare(
             "SELECT userId FROM Users WHERE userName = ? AND userType = 'patient'"
         );
+        if (!$stmt) {
+            $error = $this->connection->error;
+            error_log("Prepare failed for patient check: " . $error);
+            return "Database error: " . $error;
+        }
         $stmt->bind_param("s", $patientUserName);
         $stmt->execute();
         $stmt->bind_result($patientId);
@@ -55,37 +68,80 @@ class PharmacyDatabase {
         $stmt->close();
         
         if (!$patientId) {
+            error_log("Patient not found: " . $patientUserName);
             return "Patient not found";
         }
 
-        // Check medication exists
         $stmt = $this->connection->prepare(
-            "SELECT medicationId FROM Medications WHERE medicationId = ?"
+            "SELECT m.medicationId, i.quantityAvailable 
+             FROM Medications m 
+             JOIN Inventory i ON m.medicationId = i.medicationId 
+             WHERE m.medicationId = ?"
         );
+        if (!$stmt) {
+            $error = $this->connection->error;
+            error_log("Prepare failed for medication check: " . $error);
+            return "Database error: " . $error;
+        }
         $stmt->bind_param("i", $medicationId);
         $stmt->execute();
-        $stmt->bind_result($medId);
+        $stmt->bind_result($medId, $quantityAvailable);
         $stmt->fetch();
         $stmt->close();
 
         if (!$medId) {
+            error_log("Medication not found: " . $medicationId);
             return "Medication not found";
         }
+        if ($quantityAvailable < $quantity) {
+            error_log("Insufficient stock for medication ID " . $medicationId . ": requested " . $quantity . ", available " . $quantityAvailable);
+            return "Insufficient stock for this medication";
+        }
 
-        // Insert prescription
-        $stmt = $this->connection->prepare(
-            "INSERT INTO Prescriptions (userId, medicationId, prescribedDate, dosageInstructions, quantity) VALUES (?, ?, NOW(), ?, ?)"
-        );
-        $stmt->bind_param("iisi", $patientId, $medicationId, $dosageInstructions, $quantity);
-        $result = $stmt->execute();
-        $stmt->close();
-        return $result ? "Prescription added successfully" : "Failed to add prescription: " . $this->connection->error;
+        $this->connection->begin_transaction();
+        try {
+            $stmt = $this->connection->prepare(
+                "INSERT INTO Prescriptions (userId, medicationId, prescribedDate, dosageInstructions, quantity, refillCount) 
+                 VALUES (?, ?, NOW(), ?, ?, ?)"
+            );
+            if (!$stmt) {
+                throw new Exception("Prepare failed for prescription insert: " . $this->connection->error);
+            }
+            $stmt->bind_param("iisii", $patientId, $medicationId, $dosageInstructions, $quantity, $refillCount);
+            $stmt->execute();
+            $prescriptionId = $this->connection->insert_id;
+            $stmt->close();
+
+            $stmt = $this->connection->prepare(
+                "UPDATE Inventory SET quantityAvailable = quantityAvailable - ?, lastUpdated = NOW() WHERE medicationId = ?"
+            );
+            if (!$stmt) {
+                throw new Exception("Prepare failed for inventory update: " . $this->connection->error);
+            }
+            $stmt->bind_param("ii", $quantity, $medicationId);
+            $stmt->execute();
+            $stmt->close();
+
+            $this->connection->commit();
+            error_log("Prescription added successfully, ID: " . $prescriptionId . ", patient: " . $patientUserName . ", medication ID: " . $medicationId . ", refills: " . $refillCount);
+            return "Prescription added successfully";
+        } catch (Exception $e) {
+            $this->connection->rollback();
+            $error = "addPrescription transaction failed: " . $e->getMessage();
+            error_log($error);
+            return "Failed to add prescription: " . $e->getMessage();
+        }
     }
 
     public function addMedication($medicationName, $dosage, $manufacturer, $quantityAvailable) {
         $stmt = $this->connection->prepare(
             "INSERT INTO Medications (medicationName, dosage, manufacturer) VALUES (?, ?, ?)"
         );
+        if (!$stmt) {
+            $error = $this->connection->error;
+            error_log("Prepare failed for addMedication: " . $error);
+            return "Database error: " . $error;
+        }
         $stmt->bind_param("sss", $medicationName, $dosage, $manufacturer);
         $result = $stmt->execute();
         $stmt->close();
@@ -95,22 +151,36 @@ class PharmacyDatabase {
             $stmt = $this->connection->prepare(
                 "INSERT INTO Inventory (medicationId, quantityAvailable, lastUpdated) VALUES (?, ?, NOW())"
             );
+            if (!$stmt) {
+                $error = $this->connection->error;
+                error_log("Prepare failed for inventory insert: " . $error);
+                return "Database error: " . $error;
+            }
             $stmt->bind_param("ii", $medicationId, $quantityAvailable);
             $result = $stmt->execute();
             $stmt->close();
-            return $result ? "Medication added successfully" : "Failed to add to inventory";
+            return $result ? "Medication added successfully" : "Failed to add to inventory: " . $this->connection->error;
         }
-        return "Failed to add medication";
+        return "Failed to add medication: " . $this->connection->error;
     }
 
     public function getAllPrescriptions() {
         $result = $this->connection->query(
-            "SELECT p.*, m.medicationName, m.dosage, u.userName 
+            "SELECT p.prescriptionId, p.userId, p.medicationId, p.prescribedDate, p.dosageInstructions, p.quantity, p.refillCount, 
+                    m.medicationName, m.dosage, u.userName 
              FROM Prescriptions p 
-             JOIN Medications m ON p.medicationId = m.medicationId 
-             JOIN Users u ON p.userId = u.userId"
+             LEFT JOIN Medications m ON p.medicationId = m.medicationId 
+             LEFT JOIN Users u ON p.userId = u.userId 
+             ORDER BY p.prescribedDate DESC"
         );
-        return $result->fetch_all(MYSQLI_ASSOC);
+        if (!$result) {
+            $error = "getAllPrescriptions failed: " . $this->connection->error;
+            error_log($error);
+            return [];
+        }
+        $prescriptions = $result->fetch_all(MYSQLI_ASSOC);
+        error_log("Fetched " . count($prescriptions) . " prescriptions");
+        return $prescriptions;
     }
 
     public function getUserDetails($userId) {
@@ -123,15 +193,30 @@ class PharmacyDatabase {
              LEFT JOIN Medications m ON p.medicationId = m.medicationId
              WHERE u.userId = ?"
         );
+        if (!$stmt) {
+            $error = $this->connection->error;
+            error_log("Prepare failed for getUserDetails: " . $error);
+            return [];
+        }
         $stmt->bind_param("i", $userId);
         $stmt->execute();
         $result = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $stmt->close();
+        error_log("Fetched user details for userId: " . $userId);
         return $result;
     }
 
     public function MedicationInventory() {
-        $result = $this->connection->query("SELECT * FROM MedicationInventoryView");
+        $result = $this->connection->query(
+            "SELECT m.medicationId, m.medicationName, m.dosage, m.manufacturer, i.quantityAvailable, i.lastUpdated
+             FROM Medications m
+             JOIN Inventory i ON m.medicationId = i.medicationId"
+        );
+        if (!$result) {
+            $error = "MedicationInventory failed: " . $this->connection->error;
+            error_log($error);
+            return [];
+        }
         return $result->fetch_all(MYSQLI_ASSOC);
     }
 
@@ -139,6 +224,11 @@ class PharmacyDatabase {
         $stmt = $this->connection->prepare(
             "SELECT userId, userName, userType, password FROM Users WHERE userName = ?"
         );
+        if (!$stmt) {
+            $error = $this->connection->error;
+            error_log("Prepare failed for verifyUser: " . $error);
+            return false;
+        }
         $stmt->bind_param("s", $userName);
         $stmt->execute();
         $stmt->bind_result($userId, $userName, $userType, $hashedPassword);
@@ -146,12 +236,14 @@ class PharmacyDatabase {
         $stmt->close();
         
         if (password_verify($password, $hashedPassword)) {
+            error_log("User verified: " . $userName);
             return [
                 'userId' => $userId,
                 'userName' => $userName,
                 'userType' => $userType
             ];
         }
+        error_log("User verification failed: " . $userName);
         return false;
     }
 
@@ -159,10 +251,33 @@ class PharmacyDatabase {
         $stmt = $this->connection->prepare(
             "CALL ProcessSale(?, ?, ?)"
         );
+        if (!$stmt) {
+            $error = $this->connection->error;
+            error_log("Prepare failed for processSale: " . $error);
+            return "Database error: " . $error;
+        }
         $stmt->bind_param("iid", $prescriptionId, $quantitySold, $saleAmount);
         $result = $stmt->execute();
         $stmt->close();
-        return $result ? "Sale processed successfully" : "Failed to process sale";
+        return $result ? "Sale processed successfully" : "Failed to process sale: " . $this->connection->error;
+    }
+
+    public function getAvailableMedications() {
+        $result = $this->connection->query(
+            "SELECT m.medicationId, m.medicationName, m.dosage 
+             FROM Medications m 
+             JOIN Inventory i ON m.medicationId = i.medicationId 
+             WHERE i.quantityAvailable > 0 
+             ORDER BY m.medicationName"
+        );
+        if (!$result) {
+            $error = "getAvailableMedications failed: " . $this->connection->error;
+            error_log($error);
+            return [];
+        }
+        $medications = $result->fetch_all(MYSQLI_ASSOC);
+        error_log("Fetched " . count($medications) . " available medications");
+        return $medications;
     }
 }
 ?>

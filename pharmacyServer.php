@@ -82,6 +82,7 @@ class PharmacyPortal {
                 $_SESSION['userId'] = $user['userId'];
                 $_SESSION['userName'] = $user['userName'];
                 $_SESSION['userType'] = $user['userType'];
+                error_log("User logged in: " . $userName);
                 if ($user['userType'] === 'pharmacist') {
                     header("Location: ?action=pharmacist_home");
                 } else {
@@ -132,35 +133,73 @@ class PharmacyPortal {
             $medicationId = filter_var($_POST['medication_id'] ?? 0, FILTER_VALIDATE_INT);
             $dosageInstructions = filter_var($_POST['dosage_instructions'] ?? '', FILTER_SANITIZE_STRING);
             $quantity = filter_var($_POST['quantity'] ?? 0, FILTER_VALIDATE_INT);
+            $refillCount = filter_var($_POST['refill_count'] ?? 0, FILTER_VALIDATE_INT);
 
-            if (!$patientUserName || !$medicationId || !$dosageInstructions || $quantity <= 0) {
-                header("Location: ?action=addPrescription&error=" . urlencode("Invalid input data"));
+            if (!$patientUserName || !preg_match('/^[A-Za-z0-9_]{3,45}$/', $patientUserName)) {
+                $_SESSION['flash_error'] = "Invalid patient username";
+                error_log("Invalid patient username: " . $patientUserName);
+                header("Location: ?action=addPrescription");
+                exit;
+            }
+            if (!$medicationId || $medicationId <= 0) {
+                $_SESSION['flash_error'] = "Invalid medication selected";
+                error_log("Invalid medication ID: " . $medicationId);
+                header("Location: ?action=addPrescription");
+                exit;
+            }
+            if (empty($dosageInstructions)) {
+                $_SESSION['flash_error'] = "Dosage instructions required";
+                error_log("Dosage instructions missing");
+                header("Location: ?action=addPrescription");
+                exit;
+            }
+            if (!$quantity || $quantity <= 0) {
+                $_SESSION['flash_error'] = "Quantity must be at least 1";
+                error_log("Invalid quantity: " . $quantity);
+                header("Location: ?action=addPrescription");
+                exit;
+            }
+            if ($refillCount === false || $refillCount < 0) {
+                $_SESSION['flash_error'] = "Refills must be 0 or more";
+                error_log("Invalid refill count: " . $_POST['refill_count']);
+                header("Location: ?action=addPrescription");
                 exit;
             }
 
             try {
-                $message = $this->db->addPrescription($patientUserName, $medicationId, $dosageInstructions, $quantity);
-                header("Location: ?action=viewPrescriptions&message=" . urlencode($message));
+                $message = $this->db->addPrescription($patientUserName, $medicationId, $dosageInstructions, $quantity, $refillCount);
+                $_SESSION['flash_message'] = $message;
+                error_log("Redirecting to viewPrescriptions after adding prescription for " . $patientUserName . ", refills: " . $refillCount);
+                header("Location: ?action=viewPrescriptions");
             } catch (Exception $e) {
+                $_SESSION['flash_error'] = "Failed to add prescription: " . $e->getMessage();
                 error_log("addPrescription failed: " . $e->getMessage());
-                header("Location: ?action=addPrescription&error=" . urlencode("Database error: " . $e->getMessage()));
+                header("Location: ?action=addPrescription");
             }
         } else {
+            $Medications = $this->db->getAvailableMedications();
             include 'templates/addPrescription.php';
         }
     }
 
     private function viewPrescriptions() {
-        if ($_SESSION['userType'] === 'pharmacist') {
-            $prescriptions = $this->db->getAllPrescriptions();
-        } else {
-            $prescriptions = $this->db->getUserDetails($_SESSION['userId']);
-            // Filter to include only prescription-related data
-            $prescriptions = array_filter($prescriptions, function($detail) {
-                return !empty($detail['prescriptionId']);
-            });
+        try {
+            if ($_SESSION['userType'] === 'pharmacist') {
+                $prescriptions = $this->db->getAllPrescriptions();
+            } else {
+                $prescriptions = $this->db->getUserDetails($_SESSION['userId']);
+                // Filter to include only prescription-related data
+                $prescriptions = array_filter($prescriptions, function($detail) {
+                    return !empty($detail['prescriptionId']);
+                });
+            }
+            error_log("Rendering viewPrescriptions for user: " . $_SESSION['userName'] . ", type: " . $_SESSION['userType']);
+            include 'templates/viewPrescriptions.php';
+        } catch (Exception $e) {
+            $_SESSION['flash_error'] = "Failed to load prescriptions: " . $e->getMessage();
+            error_log("viewPrescriptions failed: " . $e->getMessage());
+            header("Location: ?action=" . ($_SESSION['userType'] === 'pharmacist' ? 'pharmacist_home' : 'patient_home'));
         }
-        include 'templates/viewPrescriptions.php';
     }
 
     private function viewInventory() {
@@ -194,7 +233,7 @@ class PharmacyPortal {
             if (in_array($userType, ['patient', 'pharmacist'])) {
                 $message = $this->db->addUser($userName, $contactInfo, $userType, $password);
                 if ($message === "User added successfully") {
-                    header("Location: ?action=peza&message=" . urlencode("User created successfully. Please log in."));
+                    header("Location: ?action=home&message=" . urlencode("User created successfully. Please log in."));
                     exit;
                 } else {
                     $error = strpos($message, "Duplicate entry") !== false 

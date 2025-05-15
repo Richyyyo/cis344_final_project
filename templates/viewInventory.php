@@ -1,15 +1,19 @@
+<?php
+session_start();
+
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>View Inventory - Pharmacist Portal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>View Inventory - Pharmacy Portal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body>
     <div class="container mt-5">
-        <h2>Medication Inventory</h2>
-        <?php session_start(); ?>
-        <p>Pharmacist: <?php echo htmlspecialchars($_SESSION['userName']); ?></p>
+        <h2>View Inventory</h2>
+        <p>Pharmacist: <?php echo htmlspecialchars($_SESSION['userName'] ?? 'Unknown'); ?></p>
         <nav class="mb-3">
             <ul class="nav nav-pills">
                 <li class="nav-item"><a href="?action=pharmacist_home" class="nav-link">Home</a></li>
@@ -23,29 +27,46 @@
                 <li class="nav-item"><a href="?action=logout" class="nav-link">Logout</a></li>
             </ul>
         </nav>
-        <?php if (isset($_GET['message'])): ?>
-            <div class="alert alert-success"><?php echo htmlspecialchars($_GET['message']); ?></div>
+        <?php if (isset($_SESSION['flash_message'])): ?>
+            <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['flash_message']); unset($_SESSION['flash_message']); ?></div>
         <?php endif; ?>
-        <table class="table table-striped">
-            <thead>
-                <tr>
-                    <th>Medication Name</th>
-                    <th>Dosage</th>
-                    <th>Manufacturer</th>
-                    <th>Quantity Available</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($inventory as $item): ?>
+        <?php if (isset($_SESSION['flash_error'])): ?>
+            <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['flash_error']); unset($_SESSION['flash_error']); ?></div>
+        <?php endif; ?>
+        <div class="table-responsive">
+            <table class="table table-striped table-bordered" aria-describedby="inventory-table">
+                <caption id="inventory-table">List of medications in inventory</caption>
+                <thead>
                     <tr>
-                        <td><?php echo htmlspecialchars($item['medicationName']); ?></td>
-                        <td><?php echo htmlspecialchars($item['dosage']); ?></td>
-                        <td><?php echo htmlspecialchars($item['manufacturer']); ?></td>
-                        <td><?php echo htmlspecialchars($item['quantityAvailable']); ?></td>
+                        <th>Medication ID</th>
+                        <th>Name</th>
+                        <th>Dosage</th>
+                        <th>Manufacturer</th>
+                        <th>Quantity Available</th>
+                        <th>Last Updated</th>
                     </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
+                </thead>
+                <tbody>
+                    <?php if (!empty($inventory)): ?>
+                        <?php foreach ($inventory as $item): ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($item['medicationId']); ?></td>
+                                <td><?php echo htmlspecialchars($item['medicationName']); ?></td>
+                                <td><?php echo htmlspecialchars($item['dosage']); ?></td>
+                                <td><?php echo htmlspecialchars($item['manufacturer']); ?></td>
+                                <td><?php echo htmlspecialchars($item['quantityAvailable']); ?></td>
+                                <td><?php echo htmlspecialchars($item['lastUpdated']); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <tr>
+                            <td colspan="6" class="text-center">No inventory items found.</td>
+                        </tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
